@@ -1,5 +1,5 @@
 import { bedrock } from '@ai-sdk/amazon-bedrock';
-import { openai } from '@ai-sdk/openai';
+import { createOpenAI } from '@ai-sdk/openai';
 import { google } from '@ai-sdk/google';
 import { smoothStream, streamText } from 'ai';
 import { createOpenRouter } from '@openrouter/ai-sdk-provider';
@@ -16,6 +16,12 @@ export async function POST(req: Request) {
 
   const { messages, data = {} } = body;
   const guide = readFileSync(resolve('./app/api/chat/xml_guide.md'), 'utf8');
+
+  // Get model configuration from environment variables
+  const modelProvider = process.env.MODEL_PROVIDER || 'openai';
+  const modelName = process.env.MODEL_NAME || 'gpt-4.1';
+  const apiKey = process.env.API_KEY || process.env.OPENAI_API_KEY;
+  const base_url = process.env.OPENAI_API_BASE;
 
   // Read and escape the guide content
   const systemMessage = `
@@ -62,20 +68,28 @@ ${lastMessage.content}
   enhancedMessages = [...enhancedMessages.slice(0, -1), { ...lastMessage, content: formattedContent }];
   // console.log("Enhanced messages:", enhancedMessages);
 
+  // Configure model based on provider from environment variables
+  let model;
+  switch(modelProvider.toLowerCase()) {
+    case 'google':
+      model = google(modelName);
+      break;
+    case 'bedrock':
+      model = bedrock(modelName);
+      break;
+    case 'openrouter':
+      model = openrouter(modelName);
+      break;
+    case 'openai':
+    default:
+      const openai = createOpenAI({baseURL:base_url,apiKey:apiKey})
+      model =  openai(modelName)
+      
+      break;
+  }
+
   const result = streamText({
-    // model: google("gemini-2.5-flash-preview-05-20"),
-    // model: google("gemini-2.0-flash-001"),
-    // model: bedrock('anthropic.claude-3-5-sonnet-20241022-v2:0'),
-    model: openai("gpt-4.1"),
-    // model: openrouter('google/gemini-2.5-pro-exp-03-25'),
-    // model: model,
-    // providerOptions: {
-    //   google: {
-    //     thinkingConfig: {
-    //       thinkingBudget: 0,
-    //     },
-    //   }
-    // },
+    model,
     toolCallStreaming: true,
     messages: enhancedMessages,
     tools: {
