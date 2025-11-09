@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(npm update:*)"
+      "Bash(npm update:*)",
+      "WebFetch(domain:ai-sdk.dev)",
+      "mcp__ide__getDiagnostics",
+      "Bash(npx tsc:*)",
+      "WebFetch(domain:sdk.vercel.ai)"
     ],
     "deny": [],
     "ask": []
