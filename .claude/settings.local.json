@@ -6,7 +6,8 @@
       "mcp__ide__getDiagnostics",
       "Bash(npx tsc:*)",
       "WebFetch(domain:sdk.vercel.ai)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(npm outdated:*)"
     ],
     "deny": [],
     "ask": []
