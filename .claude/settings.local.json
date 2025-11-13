@@ -7,7 +7,8 @@
       "Bash(npx tsc:*)",
       "WebFetch(domain:sdk.vercel.ai)",
       "Bash(npm run build:*)",
-      "Bash(npm outdated:*)"
+      "Bash(npm outdated:*)",
+      "Bash(./push-via-ec2.sh)"
     ],
     "deny": [],
     "ask": []
