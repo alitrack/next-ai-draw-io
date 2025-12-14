@@ -2,6 +2,7 @@ import { GoogleAnalytics } from "@next/third-parties/google"
 import type { Metadata, Viewport } from "next"
 import { JetBrains_Mono, Plus_Jakarta_Sans } from "next/font/google"
 import { DiagramProvider } from "@/contexts/diagram-context"
+import { EnvironmentProvider } from "@/contexts/environment-context"
 
 import "./globals.css"
 
@@ -115,7 +116,9 @@ export default function RootLayout({
             <body
                 className={`${plusJakarta.variable} ${jetbrainsMono.variable} antialiased`}
             >
-                <DiagramProvider>{children}</DiagramProvider>
+                <EnvironmentProvider>
+                    <DiagramProvider>{children}</DiagramProvider>
+                </EnvironmentProvider>
             </body>
             {process.env.NEXT_PUBLIC_GA_ID && (
                 <GoogleAnalytics gaId={process.env.NEXT_PUBLIC_GA_ID} />

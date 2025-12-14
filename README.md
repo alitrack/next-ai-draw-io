@@ -188,6 +188,63 @@ Or you can deploy by this button.
 
 Be sure to **set the environment variables** in the Vercel dashboard as you did in your local `.env.local` file.
 
+## Desktop Application
+
+Next AI Draw.io is also available as a desktop application built with Tauri, offering offline functionality and desktop integration features.
+
+### Installing the Desktop App
+
+You can download the desktop application from the [Releases page](https://github.com/DayuanJiang/next-ai-draw-io/releases) for Windows, macOS, and Linux.
+
+### Building the Desktop App Locally
+
+If you prefer to build the desktop application yourself:
+
+1. Ensure you have Rust installed. If not, install it from [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
+
+2. Install the project dependencies:
+```bash
+npm install
+```
+
+3. Build the desktop application:
+```bash
+npm run build:desktop
+```
+
+The built application will be available in the `src-tauri/target/release` directory.
+
+### Desktop-Specific Features
+
+- **Offline Mode**: Use the application without an internet connection
+- **File System Access**: Save and open diagrams directly from your local file system
+- **System Tray Integration**: Minimize the application to the system tray
+- **Native Menus**: Access common functions through native application menus
+- **Automatic Updates**: Keep your application up-to-date with the latest features and security patches
+
+### Testing the Desktop Application
+
+The desktop application has been tested on Windows, macOS, and Linux platforms. For detailed testing instructions, see [Desktop Testing Plan](./docs/desktop-testing-plan.md).
+
+To test the application locally:
+
+1. Ensure you have Rust installed. If not, install it from [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
+
+2. Install the project dependencies:
+```bash
+npm install
+```
+
+3. Run the desktop application in development mode:
+```bash
+npm run tauri:dev
+```
+
+4. To build the application for production:
+```bash
+npm run tauri:build
+```
+
 
 ## Multi-Provider Support
 
