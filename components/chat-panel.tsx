@@ -26,7 +26,7 @@ import { findCachedResponse } from "@/lib/cached-responses"
 import { isPdfFile, isTextFile } from "@/lib/pdf-utils"
 import { type FileData, useFileProcessor } from "@/lib/use-file-processor"
 import { useQuotaManager } from "@/lib/use-quota-manager"
-import { formatXML, wrapWithMxFile } from "@/lib/utils"
+import { formatXML, isMxCellXmlComplete, wrapWithMxFile } from "@/lib/utils"
 import { ChatMessageDisplay } from "./chat-message-display"
 
 // localStorage keys for persistence
@@ -40,6 +40,7 @@ interface MessagePart {
     type: string
     state?: string
     toolName?: string
+    input?: { xml?: string; [key: string]: unknown }
     [key: string]: unknown
 }
 
@@ -63,11 +64,11 @@ interface ChatPanelProps {
 // Constants for tool states
 const TOOL_ERROR_STATE = "output-error" as const
 const DEBUG = process.env.NODE_ENV === "development"
-const MAX_AUTO_RETRY_COUNT = 3
+const MAX_AUTO_RETRY_COUNT = 1
 
 /**
  * Check if auto-resubmit should happen based on tool errors.
- * Does NOT handle retry count or quota - those are handled by the caller.
+ * Only checks the LAST tool part (most recent tool call), not all tool parts.
  */
 function hasToolErrors(messages: ChatMessage[]): boolean {
     const lastMessage = messages[messages.length - 1]
@@ -84,7 +85,8 @@ function hasToolErrors(messages: ChatMessage[]): boolean {
         return false
     }
 
-    return toolParts.some((part) => part.state === TOOL_ERROR_STATE)
+    const lastToolPart = toolParts[toolParts.length - 1]
+    return lastToolPart?.state === TOOL_ERROR_STATE
 }
 
 export default function ChatPanel({
@@ -144,6 +146,7 @@ export default function ChatPanel({
     const [dailyTokenLimit, setDailyTokenLimit] = useState(0)
     const [tpmLimit, setTpmLimit] = useState(0)
     const [showNewChatDialog, setShowNewChatDialog] = useState(false)
+    const [minimalStyle, setMinimalStyle] = useState(false)
 
     // Check config on mount
     useEffect(() => {
@@ -192,8 +195,21 @@ export default function ChatPanel({
     // Ref to track consecutive auto-retry count (reset on user action)
     const autoRetryCountRef = useRef(0)
 
+    // Ref to accumulate partial XML when output is truncated due to maxOutputTokens
+    // When partialXmlRef.current.length > 0, we're in continuation mode
+    const partialXmlRef = useRef<string>("")
+
     // Persist processed tool call IDs so collapsing the chat doesn't replay old tool outputs
     const processedToolCallsRef = useRef<Set<string>>(new Set())
+
+    // Debounce timeout for localStorage writes (prevents blocking during streaming)
+    const localStorageDebounceRef = useRef<ReturnType<
+        typeof setTimeout
+    > | null>(null)
+    const xmlStorageDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(
+        null,
+    )
+    const LOCAL_STORAGE_DEBOUNCE_MS = 1000 // Save at most once per second
 
     const {
         messages,
@@ -216,14 +232,50 @@ export default function ChatPanel({
 
             if (toolCall.toolName === "display_diagram") {
                 const { xml } = toolCall.input as { xml: string }
-                if (DEBUG) {
-                    console.log(
-                        `[display_diagram] Received XML length: ${xml.length}`,
-                    )
+
+                // DEBUG: Log raw input to diagnose false truncation detection
+                console.log(
+                    "[display_diagram] XML ending (last 100 chars):",
+                    xml.slice(-100),
+                )
+                console.log("[display_diagram] XML length:", xml.length)
+
+                // Check if XML is truncated (incomplete mxCell indicates truncated output)
+                const isTruncated = !isMxCellXmlComplete(xml)
+                console.log("[display_diagram] isTruncated:", isTruncated)
+
+                if (isTruncated) {
+                    // Store the partial XML for continuation via append_diagram
+                    partialXmlRef.current = xml
+
+                    // Tell LLM to use append_diagram to continue
+                    const partialEnding = partialXmlRef.current.slice(-500)
+                    addToolOutput({
+                        tool: "display_diagram",
+                        toolCallId: toolCall.toolCallId,
+                        state: "output-error",
+                        errorText: `Output was truncated due to length limits. Use the append_diagram tool to continue.
+
+Your output ended with:
+\`\`\`
+${partialEnding}
+\`\`\`
+
+NEXT STEP: Call append_diagram with the continuation XML.
+- Do NOT include wrapper tags or root cells (id="0", id="1")
+- Start from EXACTLY where you stopped
+- Complete all remaining mxCell elements`,
+                    })
+                    return
                 }
 
+                // Complete XML received - use it directly
+                // (continuation is now handled via append_diagram tool)
+                const finalXml = xml
+                partialXmlRef.current = "" // Reset any partial from previous truncation
+
                 // Wrap raw XML with full mxfile structure for draw.io
-                const fullXml = wrapWithMxFile(xml)
+                const fullXml = wrapWithMxFile(finalXml)
 
                 // loadDiagram validates and returns error if invalid
                 const validationError = onDisplayChart(fullXml)
@@ -249,7 +301,7 @@ Please fix the XML issues and call display_diagram again with corrected XML.
 
 Your failed XML:
 \`\`\`xml
-${xml}
+${finalXml}
 \`\`\``,
                     })
                 } else {
@@ -277,27 +329,13 @@ ${xml}
 
                 let currentXml = ""
                 try {
-                    console.log("[edit_diagram] Starting...")
                     // Use chartXML from ref directly - more reliable than export
-                    // especially on Vercel where DrawIO iframe may have latency issues
-                    // Using ref to avoid stale closure in callback
                     const cachedXML = chartXMLRef.current
                     if (cachedXML) {
                         currentXml = cachedXML
-                        console.log(
-                            "[edit_diagram] Using cached chartXML, length:",
-                            currentXml.length,
-                        )
                     } else {
                         // Fallback to export only if no cached XML
-                        console.log(
-                            "[edit_diagram] No cached XML, fetching from DrawIO...",
-                        )
                         currentXml = await onFetchChart(false)
-                        console.log(
-                            "[edit_diagram] Got XML from export, length:",
-                            currentXml.length,
-                        )
                     }
 
                     const { replaceXMLParts } = await import("@/lib/utils")
@@ -331,7 +369,6 @@ Please fix the edit to avoid structural issues (e.g., duplicate IDs, invalid ref
                         toolCallId: toolCall.toolCallId,
                         output: `Successfully applied ${edits.length} edit(s) to the diagram.`,
                     })
-                    console.log("[edit_diagram] Success")
                 } catch (error) {
                     console.error("[edit_diagram] Failed:", error)
 
@@ -353,6 +390,87 @@ ${currentXml || "No XML available"}
 Please retry with an adjusted search pattern or use display_diagram if retries are exhausted.`,
                     })
                 }
+            } else if (toolCall.toolName === "append_diagram") {
+                const { xml } = toolCall.input as { xml: string }
+
+                // Detect if LLM incorrectly started fresh instead of continuing
+                // LLM should only output bare mxCells now, so wrapper tags indicate error
+                const trimmed = xml.trim()
+                const isFreshStart =
+                    trimmed.startsWith("<mxGraphModel") ||
+                    trimmed.startsWith("<root") ||
+                    trimmed.startsWith("<mxfile") ||
+                    trimmed.startsWith('<mxCell id="0"') ||
+                    trimmed.startsWith('<mxCell id="1"')
+
+                if (isFreshStart) {
+                    addToolOutput({
+                        tool: "append_diagram",
+                        toolCallId: toolCall.toolCallId,
+                        state: "output-error",
+                        errorText: `ERROR: You started fresh with wrapper tags. Do NOT include wrapper tags or root cells (id="0", id="1").
+
+Continue from EXACTLY where the partial ended:
+\`\`\`
+${partialXmlRef.current.slice(-500)}
+\`\`\`
+
+Start your continuation with the NEXT character after where it stopped.`,
+                    })
+                    return
+                }
+
+                // Append to accumulated XML
+                partialXmlRef.current += xml
+
+                // Check if XML is now complete (last mxCell is complete)
+                const isComplete = isMxCellXmlComplete(partialXmlRef.current)
+
+                if (isComplete) {
+                    // Wrap and display the complete diagram
+                    const finalXml = partialXmlRef.current
+                    partialXmlRef.current = "" // Reset
+
+                    const fullXml = wrapWithMxFile(finalXml)
+                    const validationError = onDisplayChart(fullXml)
+
+                    if (validationError) {
+                        addToolOutput({
+                            tool: "append_diagram",
+                            toolCallId: toolCall.toolCallId,
+                            state: "output-error",
+                            errorText: `Validation error after assembly: ${validationError}
+
+Assembled XML:
+\`\`\`xml
+${finalXml.substring(0, 2000)}...
+\`\`\`
+
+Please use display_diagram with corrected XML.`,
+                        })
+                    } else {
+                        addToolOutput({
+                            tool: "append_diagram",
+                            toolCallId: toolCall.toolCallId,
+                            output: "Diagram assembly complete and displayed successfully.",
+                        })
+                    }
+                } else {
+                    // Still incomplete - signal to continue
+                    addToolOutput({
+                        tool: "append_diagram",
+                        toolCallId: toolCall.toolCallId,
+                        state: "output-error",
+                        errorText: `XML still incomplete (mxCell not closed). Call append_diagram again to continue.
+
+Current ending:
+\`\`\`
+${partialXmlRef.current.slice(-500)}
+\`\`\`
+
+Continue from EXACTLY where you stopped.`,
+                    })
+                }
             }
         },
         onError: (error) => {
@@ -369,6 +487,12 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
             // Simple check for network errors if message is generic
             if (friendlyMessage === "Failed to fetch") {
                 friendlyMessage = "Network error. Please check your connection."
+            }
+
+            // Truncated tool input error (model output limit too low)
+            if (friendlyMessage.includes("toolUse.input is invalid")) {
+                friendlyMessage =
+                    "Output was truncated before the diagram could be generated. Try a simpler request or increase the maxOutputLength."
             }
 
             // Translate image not supported error
@@ -398,6 +522,11 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
             const metadata = message?.metadata as
                 | Record<string, unknown>
                 | undefined
+
+            // DEBUG: Log finish reason to diagnose truncation
+            console.log("[onFinish] finishReason:", metadata?.finishReason)
+            console.log("[onFinish] metadata:", metadata)
+
             if (metadata) {
                 // Use Number.isFinite to guard against NaN (typeof NaN === 'number' is true)
                 const inputTokens = Number.isFinite(metadata.inputTokens)
@@ -414,65 +543,55 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
             }
         },
         sendAutomaticallyWhen: ({ messages }) => {
+            const isInContinuationMode = partialXmlRef.current.length > 0
+
             const shouldRetry = hasToolErrors(
                 messages as unknown as ChatMessage[],
             )
 
             if (!shouldRetry) {
-                // No error, reset retry count
+                // No error, reset retry count and clear state
                 autoRetryCountRef.current = 0
-                if (DEBUG) {
-                    console.log("[sendAutomaticallyWhen] No errors, stopping")
-                }
+                partialXmlRef.current = ""
                 return false
             }
 
-            // Check retry count limit
-            if (autoRetryCountRef.current >= MAX_AUTO_RETRY_COUNT) {
-                if (DEBUG) {
-                    console.log(
-                        `[sendAutomaticallyWhen] Max retry count (${MAX_AUTO_RETRY_COUNT}) reached, stopping`,
+            // Continuation mode: unlimited retries (truncation continuation, not real errors)
+            // Server limits to 5 steps via stepCountIs(5)
+            if (isInContinuationMode) {
+                // Don't count against retry limit for continuation
+                // Quota checks still apply below
+            } else {
+                // Regular error: check retry count limit
+                if (autoRetryCountRef.current >= MAX_AUTO_RETRY_COUNT) {
+                    toast.error(
+                        `Auto-retry limit reached (${MAX_AUTO_RETRY_COUNT}). Please try again manually.`,
                     )
+                    autoRetryCountRef.current = 0
+                    partialXmlRef.current = ""
+                    return false
                 }
-                toast.error(
-                    `Auto-retry limit reached (${MAX_AUTO_RETRY_COUNT}). Please try again manually.`,
-                )
-                autoRetryCountRef.current = 0
-                return false
+                // Increment retry count for actual errors
+                autoRetryCountRef.current++
             }
 
             // Check quota limits before auto-retry
             const tokenLimitCheck = quotaManager.checkTokenLimit()
             if (!tokenLimitCheck.allowed) {
-                if (DEBUG) {
-                    console.log(
-                        "[sendAutomaticallyWhen] Token limit exceeded, stopping",
-                    )
-                }
                 quotaManager.showTokenLimitToast(tokenLimitCheck.used)
                 autoRetryCountRef.current = 0
+                partialXmlRef.current = ""
                 return false
             }
 
             const tpmCheck = quotaManager.checkTPMLimit()
             if (!tpmCheck.allowed) {
-                if (DEBUG) {
-                    console.log(
-                        "[sendAutomaticallyWhen] TPM limit exceeded, stopping",
-                    )
-                }
                 quotaManager.showTPMLimitToast()
                 autoRetryCountRef.current = 0
+                partialXmlRef.current = ""
                 return false
             }
 
-            // Increment retry count and allow retry
-            autoRetryCountRef.current++
-            if (DEBUG) {
-                console.log(
-                    `[sendAutomaticallyWhen] Retrying (${autoRetryCountRef.current}/${MAX_AUTO_RETRY_COUNT})`,
-                )
-            }
             return true
         },
     })
@@ -513,6 +632,10 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
             }
         } catch (error) {
             console.error("Failed to restore from localStorage:", error)
+            // On complete failure, clear storage to allow recovery
+            localStorage.removeItem(STORAGE_MESSAGES_KEY)
+            localStorage.removeItem(STORAGE_XML_SNAPSHOTS_KEY)
+            toast.error("Session data was corrupted. Starting fresh.")
         }
     }, [setMessages])
 
@@ -557,32 +680,71 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
         }, 500)
     }, [isDrawioReady, onDisplayChart])
 
-    // Save messages to localStorage whenever they change
+    // Save messages to localStorage whenever they change (debounced to prevent blocking during streaming)
     useEffect(() => {
         if (!hasRestoredRef.current) return
-        try {
-            localStorage.setItem(STORAGE_MESSAGES_KEY, JSON.stringify(messages))
-        } catch (error) {
-            console.error("Failed to save messages to localStorage:", error)
+
+        // Clear any pending save
+        if (localStorageDebounceRef.current) {
+            clearTimeout(localStorageDebounceRef.current)
+        }
+
+        // Debounce: save after 1 second of no changes
+        localStorageDebounceRef.current = setTimeout(() => {
+            try {
+                console.time("perf:localStorage-messages")
+                localStorage.setItem(
+                    STORAGE_MESSAGES_KEY,
+                    JSON.stringify(messages),
+                )
+                console.timeEnd("perf:localStorage-messages")
+            } catch (error) {
+                console.error("Failed to save messages to localStorage:", error)
+            }
+        }, LOCAL_STORAGE_DEBOUNCE_MS)
+
+        // Cleanup on unmount
+        return () => {
+            if (localStorageDebounceRef.current) {
+                clearTimeout(localStorageDebounceRef.current)
+            }
         }
     }, [messages])
 
-    // Save diagram XML to localStorage whenever it changes
+    // Save diagram XML to localStorage whenever it changes (debounced)
     useEffect(() => {
         if (!canSaveDiagram) return
-        if (chartXML && chartXML.length > 300) {
+        if (!chartXML || chartXML.length <= 300) return
+
+        // Clear any pending save
+        if (xmlStorageDebounceRef.current) {
+            clearTimeout(xmlStorageDebounceRef.current)
+        }
+
+        // Debounce: save after 1 second of no changes
+        xmlStorageDebounceRef.current = setTimeout(() => {
+            console.time("perf:localStorage-xml")
             localStorage.setItem(STORAGE_DIAGRAM_XML_KEY, chartXML)
+            console.timeEnd("perf:localStorage-xml")
+        }, LOCAL_STORAGE_DEBOUNCE_MS)
+
+        return () => {
+            if (xmlStorageDebounceRef.current) {
+                clearTimeout(xmlStorageDebounceRef.current)
+            }
         }
     }, [chartXML, canSaveDiagram])
 
     // Save XML snapshots to localStorage whenever they change
     const saveXmlSnapshots = useCallback(() => {
         try {
+            console.time("perf:localStorage-snapshots")
             const snapshotsArray = Array.from(xmlSnapshotsRef.current.entries())
             localStorage.setItem(
                 STORAGE_XML_SNAPSHOTS_KEY,
                 JSON.stringify(snapshotsArray),
             )
+            console.timeEnd("perf:localStorage-snapshots")
         } catch (error) {
             console.error(
                 "Failed to save XML snapshots to localStorage:",
@@ -817,8 +979,9 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
         previousXml: string,
         sessionId: string,
     ) => {
-        // Reset auto-retry count on user-initiated message
+        // Reset all retry/continuation state on user-initiated message
         autoRetryCountRef.current = 0
+        partialXmlRef.current = ""
 
         const config = getAIConfig()
 
@@ -837,6 +1000,9 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
                             "x-ai-api-key": config.aiApiKey,
                         }),
                         ...(config.aiModel && { "x-ai-model": config.aiModel }),
+                    }),
+                    ...(minimalStyle && {
+                        "x-minimal-style": "true",
                     }),
                 },
             },
@@ -1023,6 +1189,7 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
                     style: {
                         maxWidth: "480px",
                     },
+                    duration: 2000,
                 }}
             />
             {/* Header */}
@@ -1152,6 +1319,8 @@ Please retry with an adjusted search pattern or use display_diagram if retries a
                     onToggleHistory={setShowHistory}
                     sessionId={sessionId}
                     error={error}
+                    minimalStyle={minimalStyle}
+                    onMinimalStyleChange={setMinimalStyle}
                 />
             </footer>
 

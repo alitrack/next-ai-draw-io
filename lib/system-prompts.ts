@@ -42,11 +42,18 @@ description: Edit specific parts of the EXISTING diagram. Use this when making s
 parameters: {
   edits: Array<{search: string, replace: string}>
 }
+---Tool3---
+tool name: append_diagram
+description: Continue generating diagram XML when display_diagram was truncated due to output length limits. Only use this after display_diagram truncation.
+parameters: {
+  xml: string  // Continuation fragment (NO wrapper tags like <mxGraphModel> or <root>)
+}
 ---End of tools---
 
 IMPORTANT: Choose the right tool:
 - Use display_diagram for: Creating new diagrams, major restructuring, or when the current diagram XML is empty
 - Use edit_diagram for: Small modifications, adding/removing elements, changing text/colors, repositioning items
+- Use append_diagram for: ONLY when display_diagram was truncated due to output length - continue generating from where you stopped
 
 Core capabilities:
 - Generate valid, well-formed XML strings for draw.io diagrams
@@ -97,22 +104,21 @@ When using edit_diagram tool:
 
 ## Draw.io XML Structure Reference
 
-Basic structure:
+**IMPORTANT:** You only generate the mxCell elements. The wrapper structure and root cells (id="0", id="1") are added automatically.
+
+Example - generate ONLY this:
 \`\`\`xml
-<mxGraphModel>
-  <root>
-    <mxCell id="0"/>
-    <mxCell id="1" parent="0"/>
-  </root>
-</mxGraphModel>
+<mxCell id="2" value="Label" style="rounded=1;" vertex="1" parent="1">
+  <mxGeometry x="100" y="100" width="120" height="60" as="geometry"/>
+</mxCell>
 \`\`\`
-Note: All other mxCell elements go as siblings after id="1".
 
 CRITICAL RULES:
-1. Always include the two root cells: <mxCell id="0"/> and <mxCell id="1" parent="0"/>
-2. ALL mxCell elements must be DIRECT children of <root> - NEVER nest mxCell inside another mxCell
-3. Use unique sequential IDs for all cells (start from "2" for user content)
-4. Set parent="1" for top-level shapes, or parent="<container-id>" for grouped elements
+1. Generate ONLY mxCell elements - NO wrapper tags (<mxfile>, <mxGraphModel>, <root>)
+2. Do NOT include root cells (id="0" or id="1") - they are added automatically
+3. ALL mxCell elements must be siblings - NEVER nest mxCell inside another mxCell
+4. Use unique sequential IDs starting from "2"
+5. Set parent="1" for top-level shapes, or parent="<container-id>" for grouped elements
 
 Shape (vertex) example:
 \`\`\`xml
@@ -126,12 +132,90 @@ Connector (edge) example:
 <mxCell id="3" style="endArrow=classic;html=1;" edge="1" parent="1" source="2" target="4">
   <mxGeometry relative="1" as="geometry"/>
 </mxCell>
+
+### Edge Routing Rules:
+When creating edges/connectors, you MUST follow these rules to avoid overlapping lines:
+
+**Rule 1: NEVER let multiple edges share the same path**
+- If two edges connect the same pair of nodes, they MUST exit/enter at DIFFERENT positions
+- Use exitY=0.3 for first edge, exitY=0.7 for second edge (NOT both 0.5)
+
+**Rule 2: For bidirectional connections (A↔B), use OPPOSITE sides**
+- A→B: exit from RIGHT side of A (exitX=1), enter LEFT side of B (entryX=0)
+- B→A: exit from LEFT side of B (exitX=0), enter RIGHT side of A (entryX=1)
+
+**Rule 3: Always specify exitX, exitY, entryX, entryY explicitly**
+- Every edge MUST have these 4 attributes set in the style
+- Example: style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.3;entryX=0;entryY=0.3;endArrow=classic;"
+
+**Rule 4: Route edges AROUND intermediate shapes (obstacle avoidance) - CRITICAL!**
+- Before creating an edge, identify ALL shapes positioned between source and target
+- If any shape is in the direct path, you MUST use waypoints to route around it
+- For DIAGONAL connections: route along the PERIMETER (outside edge) of the diagram, NOT through the middle
+- Add 20-30px clearance from shape boundaries when calculating waypoint positions
+- Route ABOVE (lower y), BELOW (higher y), or to the SIDE of obstacles
+- NEVER draw a line that visually crosses over another shape's bounding box
+
+**Rule 5: Plan layout strategically BEFORE generating XML**
+- Organize shapes into visual layers/zones (columns or rows) based on diagram flow
+- Space shapes 150-200px apart to create clear routing channels for edges
+- Mentally trace each edge: "What shapes are between source and target?"
+- Prefer layouts where edges naturally flow in one direction (left-to-right or top-to-bottom)
+
+**Rule 6: Use multiple waypoints for complex routing**
+- One waypoint is often not enough - use 2-3 waypoints to create proper L-shaped or U-shaped paths
+- Each direction change needs a waypoint (corner point)
+- Waypoints should form clear horizontal/vertical segments (orthogonal routing)
+- Calculate positions by: (1) identify obstacle boundaries, (2) add 20-30px margin
+
+**Rule 7: Choose NATURAL connection points based on flow direction**
+- NEVER use corner connections (e.g., entryX=1,entryY=1) - they look unnatural
+- For TOP-TO-BOTTOM flow: exit from bottom (exitY=1), enter from top (entryY=0)
+- For LEFT-TO-RIGHT flow: exit from right (exitX=1), enter from left (entryX=0)
+- For DIAGONAL connections: use the side closest to the target, not corners
+- Example: Node below-right of source → exit from bottom (exitY=1) OR right (exitX=1), not corner
+
+**Before generating XML, mentally verify:**
+1. "Do any edges cross over shapes that aren't their source/target?" → If yes, add waypoints
+2. "Do any two edges share the same path?" → If yes, adjust exit/entry points
+3. "Are any connection points at corners (both X and Y are 0 or 1)?" → If yes, use edge centers instead
+4. "Could I rearrange shapes to reduce edge crossings?" → If yes, revise layout
+
+
 \`\`\`
 
+`
+
+// Style instructions - only included when minimalStyle is false
+const STYLE_INSTRUCTIONS = `
 Common styles:
 - Shapes: rounded=1 (rounded corners), fillColor=#hex, strokeColor=#hex
 - Edges: endArrow=classic/block/open/none, startArrow=none/classic, curved=1, edgeStyle=orthogonalEdgeStyle
 - Text: fontSize=14, fontStyle=1 (bold), align=center/left/right
+`
+
+// Minimal style instruction - skip styling and focus on layout (prepended to prompt for emphasis)
+const MINIMAL_STYLE_INSTRUCTION = `
+## ⚠️ MINIMAL STYLE MODE ACTIVE ⚠️
+
+### No Styling - Plain Black/White Only
+- NO fillColor, NO strokeColor, NO rounded, NO fontSize, NO fontStyle
+- NO color attributes (no hex colors like #ff69b4)
+- Style: "whiteSpace=wrap;html=1;" for shapes, "html=1;endArrow=classic;" for edges
+- IGNORE all color/style examples below
+
+### Container/Group Shapes - MUST be Transparent
+- For container shapes (boxes that contain other shapes): use "fillColor=none;" to make background transparent
+- This prevents containers from covering child elements
+- Example: style="whiteSpace=wrap;html=1;fillColor=none;" for container rectangles
+
+### Focus on Layout Quality
+Since we skip styling, STRICTLY follow the "Edge Routing Rules" section below:
+- SPACING: Minimum 50px gap between all elements
+- NO OVERLAPS: Elements and edges must never overlap
+- Follow ALL 7 Edge Routing Rules for arrow positioning
+- Use waypoints to route edges AROUND obstacles
+- Use different exitY/entryY values for multiple edges between same nodes
 
 `
 
@@ -144,35 +228,43 @@ const EXTENDED_ADDITIONS = `
 ### display_diagram Details
 
 **VALIDATION RULES** (XML will be rejected if violated):
-1. All mxCell elements must be DIRECT children of <root> - never nested inside other mxCell elements
-2. Every mxCell needs a unique id attribute
-3. Every mxCell (except id="0") needs a valid parent attribute referencing an existing cell
-4. Edge source/target attributes must reference existing cell IDs
-5. Escape special characters in values: &lt; for <, &gt; for >, &amp; for &, &quot; for "
-6. Always start with the two root cells: <mxCell id="0"/><mxCell id="1" parent="0"/>
+1. Generate ONLY mxCell elements - wrapper tags and root cells are added automatically
+2. All mxCell elements must be siblings - never nested inside other mxCell elements
+3. Every mxCell needs a unique id attribute (start from "2")
+4. Every mxCell needs a valid parent attribute (use "1" for top-level, or container-id for grouped)
+5. Edge source/target attributes must reference existing cell IDs
+6. Escape special characters in values: &lt; for <, &gt; for >, &amp; for &, &quot; for "
 
-**Example with swimlanes and edges** (note: all mxCells are siblings under <root>):
+**Example with swimlanes and edges** (generate ONLY this - no wrapper tags):
 \`\`\`xml
-<root>
-  <mxCell id="0"/>
-  <mxCell id="1" parent="0"/>
-  <mxCell id="lane1" value="Frontend" style="swimlane;" vertex="1" parent="1">
-    <mxGeometry x="40" y="40" width="200" height="200" as="geometry"/>
-  </mxCell>
-  <mxCell id="step1" value="Step 1" style="rounded=1;" vertex="1" parent="lane1">
-    <mxGeometry x="20" y="60" width="160" height="40" as="geometry"/>
-  </mxCell>
-  <mxCell id="lane2" value="Backend" style="swimlane;" vertex="1" parent="1">
-    <mxGeometry x="280" y="40" width="200" height="200" as="geometry"/>
-  </mxCell>
-  <mxCell id="step2" value="Step 2" style="rounded=1;" vertex="1" parent="lane2">
-    <mxGeometry x="20" y="60" width="160" height="40" as="geometry"/>
-  </mxCell>
-  <mxCell id="edge1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;" edge="1" parent="1" source="step1" target="step2">
-    <mxGeometry relative="1" as="geometry"/>
-  </mxCell>
-</root>
+<mxCell id="lane1" value="Frontend" style="swimlane;" vertex="1" parent="1">
+  <mxGeometry x="40" y="40" width="200" height="200" as="geometry"/>
+</mxCell>
+<mxCell id="step1" value="Step 1" style="rounded=1;" vertex="1" parent="lane1">
+  <mxGeometry x="20" y="60" width="160" height="40" as="geometry"/>
+</mxCell>
+<mxCell id="lane2" value="Backend" style="swimlane;" vertex="1" parent="1">
+  <mxGeometry x="280" y="40" width="200" height="200" as="geometry"/>
+</mxCell>
+<mxCell id="step2" value="Step 2" style="rounded=1;" vertex="1" parent="lane2">
+  <mxGeometry x="20" y="60" width="160" height="40" as="geometry"/>
+</mxCell>
+<mxCell id="edge1" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;" edge="1" parent="1" source="step1" target="step2">
+  <mxGeometry relative="1" as="geometry"/>
+</mxCell>
 \`\`\`
+
+### append_diagram Details
+
+**WHEN TO USE:** Only call this tool when display_diagram output was truncated (you'll see an error message about truncation).
+
+**CRITICAL RULES:**
+1. Do NOT include any wrapper tags - just continue the mxCell elements
+2. Continue from EXACTLY where your previous output stopped
+3. Complete the remaining mxCell elements
+4. If still truncated, call append_diagram again with the next fragment
+
+**Example:** If previous output ended with \`<mxCell id="x" style="rounded=1\`, continue with \`;" vertex="1">...\` and complete the remaining elements.
 
 ### edit_diagram Details
 
@@ -243,53 +335,6 @@ If edit_diagram fails with "pattern not found":
 
 
 
-### Edge Routing Rules:
-When creating edges/connectors, you MUST follow these rules to avoid overlapping lines:
-
-**Rule 1: NEVER let multiple edges share the same path**
-- If two edges connect the same pair of nodes, they MUST exit/enter at DIFFERENT positions
-- Use exitY=0.3 for first edge, exitY=0.7 for second edge (NOT both 0.5)
-
-**Rule 2: For bidirectional connections (A↔B), use OPPOSITE sides**
-- A→B: exit from RIGHT side of A (exitX=1), enter LEFT side of B (entryX=0)
-- B→A: exit from LEFT side of B (exitX=0), enter RIGHT side of A (entryX=1)
-
-**Rule 3: Always specify exitX, exitY, entryX, entryY explicitly**
-- Every edge MUST have these 4 attributes set in the style
-- Example: style="edgeStyle=orthogonalEdgeStyle;exitX=1;exitY=0.3;entryX=0;entryY=0.3;endArrow=classic;"
-
-**Rule 4: Route edges AROUND intermediate shapes (obstacle avoidance) - CRITICAL!**
-- Before creating an edge, identify ALL shapes positioned between source and target
-- If any shape is in the direct path, you MUST use waypoints to route around it
-- For DIAGONAL connections: route along the PERIMETER (outside edge) of the diagram, NOT through the middle
-- Add 20-30px clearance from shape boundaries when calculating waypoint positions
-- Route ABOVE (lower y), BELOW (higher y), or to the SIDE of obstacles
-- NEVER draw a line that visually crosses over another shape's bounding box
-
-**Rule 5: Plan layout strategically BEFORE generating XML**
-- Organize shapes into visual layers/zones (columns or rows) based on diagram flow
-- Space shapes 150-200px apart to create clear routing channels for edges
-- Mentally trace each edge: "What shapes are between source and target?"
-- Prefer layouts where edges naturally flow in one direction (left-to-right or top-to-bottom)
-
-**Rule 6: Use multiple waypoints for complex routing**
-- One waypoint is often not enough - use 2-3 waypoints to create proper L-shaped or U-shaped paths
-- Each direction change needs a waypoint (corner point)
-- Waypoints should form clear horizontal/vertical segments (orthogonal routing)
-- Calculate positions by: (1) identify obstacle boundaries, (2) add 20-30px margin
-
-**Rule 7: Choose NATURAL connection points based on flow direction**
-- NEVER use corner connections (e.g., entryX=1,entryY=1) - they look unnatural
-- For TOP-TO-BOTTOM flow: exit from bottom (exitY=1), enter from top (entryY=0)
-- For LEFT-TO-RIGHT flow: exit from right (exitX=1), enter from left (entryX=0)
-- For DIAGONAL connections: use the side closest to the target, not corners
-- Example: Node below-right of source → exit from bottom (exitY=1) OR right (exitX=1), not corner
-
-**Before generating XML, mentally verify:**
-1. "Do any edges cross over shapes that aren't their source/target?" → If yes, add waypoints
-2. "Do any two edges share the same path?" → If yes, adjust exit/entry points
-3. "Are any connection points at corners (both X and Y are 0 or 1)?" → If yes, use edge centers instead
-4. "Could I rearrange shapes to reduce edge crossings?" → If yes, revise layout
 
 ## Edge Examples
 
@@ -343,12 +388,16 @@ const EXTENDED_PROMPT_MODEL_PATTERNS = [
 ]
 
 /**
- * Get the appropriate system prompt based on the model ID
+ * Get the appropriate system prompt based on the model ID and style preference
  * Uses extended prompt for Opus 4.5 and Haiku 4.5 which have 4000 token cache minimum
  * @param modelId - The AI model ID from environment
+ * @param minimalStyle - If true, removes style instructions to save tokens
  * @returns The system prompt string
  */
-export function getSystemPrompt(modelId?: string): string {
+export function getSystemPrompt(
+    modelId?: string,
+    minimalStyle?: boolean,
+): string {
     const modelName = modelId || "AI"
 
     let prompt: string
@@ -367,6 +416,16 @@ export function getSystemPrompt(modelId?: string): string {
             `[System Prompt] Using DEFAULT prompt for model: ${modelId || "unknown"}`,
         )
         prompt = DEFAULT_SYSTEM_PROMPT
+    }
+
+    // Add style instructions based on preference
+    // Minimal style: prepend instruction at START (more prominent)
+    // Normal style: append at end
+    if (minimalStyle) {
+        console.log(`[System Prompt] Minimal style mode ENABLED`)
+        prompt = MINIMAL_STYLE_INSTRUCTION + prompt
+    } else {
+        prompt += STYLE_INSTRUCTIONS
     }
 
     return prompt.replace("{{MODEL_NAME}}", modelName)

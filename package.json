@@ -1,6 +1,6 @@
 {
     "name": "next-ai-draw-io",
-    "version": "0.4.0",
+    "version": "0.4.1",
     "license": "Apache-2.0",
     "private": true,
     "scripts": {
@@ -19,7 +19,7 @@
         "build:desktop": "node scripts/build-desktop.js"
     },
     "dependencies": {
-        "@ai-sdk/amazon-bedrock": "^3.0.62",
+        "@ai-sdk/amazon-bedrock": "^3.0.70",
         "@ai-sdk/anthropic": "^2.0.44",
         "@ai-sdk/azure": "^2.0.69",
         "@ai-sdk/deepseek": "^1.0.30",
@@ -51,6 +51,7 @@
         "clsx": "^2.1.1",
         "js-tiktoken": "^1.0.21",
         "jsdom": "^26.0.0",
+        "jsonrepair": "^3.13.1",
         "lucide-react": "^0.483.0",
         "motion": "^12.23.25",
         "next": "^16.0.7",
