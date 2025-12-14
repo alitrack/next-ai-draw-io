@@ -1,0 +1,46 @@
+{
+    "productName": "Next AI Draw.io",
+    "version": "0.4.0",
+    "identifier": "jp.jiang.next-ai-draw-io",
+    "build": {
+        "beforeBuildCommand": "npm run build",
+        "beforeDevCommand": "npm run dev",
+        "devUrl": "http://localhost:6002",
+        "frontendDist": "./out"
+    },
+    "app": {
+        "windows": [
+            {
+                "title": "Next AI Draw.io",
+                "width": 1200,
+                "height": 800,
+                "resizable": true,
+                "fullscreen": false
+            }
+        ],
+        "security": {
+            "csp": null
+        }
+    },
+    "bundle": {
+        "active": true,
+        "targets": "all",
+        "icon": [
+            "icons_new/32x32.png",
+            "icons_new/128x128.png",
+            "icons_new/128x128@2x.png",
+            "icons_new/icon.icns",
+            "icons_new/icon.ico"
+        ]
+    },
+    "plugins": {
+        "updater": {
+            "active": true,
+            "endpoints": [
+                "https://github.com/DayuanJiang/next-ai-draw-io/releases/latest/download/latest.json"
+            ],
+            "dialog": true,
+            "pubkey": ""
+        }
+    }
+}
