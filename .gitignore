@@ -47,3 +47,7 @@ push-via-ec2.sh
 .open-next/
 .wrangler/
 target/
+
+# Tauri portable build
+portable/
+src-tauri/gen/

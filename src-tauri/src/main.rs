@@ -1,10 +1,20 @@
 // Prevents additional console window on Windows in release, DO NOT REMOVE!!
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+// TEMPORARILY DISABLED FOR DEBUGGING - RE-ENABLE AFTER FIXING CRASH
+// #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_updater::UpdaterExt;
+use tauri::Manager;
+use std::process::{Command, Child};
+use std::sync::Mutex;
+
+// Global variable to store the Next.js server process
+static SERVER_PROCESS: Mutex<Option<Child>> = Mutex::new(None);
 
 fn main() {
+    println!("=== Next AI Draw.io Starting ===");
+    println!("Initializing Tauri application...");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -16,8 +26,208 @@ fn main() {
             write_file,
             check_for_updates_command
         ])
+        .setup(|app| {
+            println!("Setup hook called");
+            #[cfg(not(debug_assertions))]
+            {
+                println!("Production mode detected - starting Next.js server");
+                // Start Next.js server in production mode
+                match start_nextjs_server(app.handle().clone()) {
+                    Ok(_) => println!("Next.js server started successfully"),
+                    Err(e) => {
+                        eprintln!("FATAL ERROR starting Next.js server: {}", e);
+                        eprintln!("Error details: {:?}", e);
+                        return Err(e);
+                    }
+                }
+            }
+            #[cfg(debug_assertions)]
+            {
+                println!("Debug mode - skipping Next.js server start");
+            }
+            println!("Setup completed successfully");
+            Ok(())
+        })
+        .on_window_event(|_window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                println!("Window destroyed - stopping Next.js server");
+                // Stop the Next.js server when the window is closed
+                stop_nextjs_server();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+
+    println!("Application exited normally");
+}
+
+#[cfg(not(debug_assertions))]
+fn start_nextjs_server(app_handle: tauri::AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::env;
+
+    println!("[1/7] Getting resource directory path...");
+
+    // Try to get resource directory from Tauri (works when bundled)
+    let server_path = if let Ok(resource_dir) = app_handle.path().resource_dir() {
+        println!("  ✓ Resource directory from Tauri: {:?}", resource_dir);
+        let tauri_server_path = resource_dir.join("out");
+        if tauri_server_path.exists() {
+            println!("  ✓ Using Tauri bundled resources");
+            tauri_server_path
+        } else {
+            println!("  ⚠ Tauri resource dir doesn't contain 'out', trying portable mode...");
+            // Fall back to portable mode
+            let exe_dir = env::current_exe()?.parent()
+                .ok_or("Failed to get exe directory")?
+                .to_path_buf();
+            println!("  Executable directory: {:?}", exe_dir);
+            let portable_path = exe_dir.join("out");
+            if portable_path.exists() {
+                println!("  ✓ Using portable mode resources");
+                portable_path
+            } else {
+                // Try one more location: next to the project root
+                let workspace_path = exe_dir.parent()
+                    .and_then(|p| p.parent())
+                    .ok_or("Failed to find workspace")?
+                    .join("out");
+                println!("  Trying workspace path: {:?}", workspace_path);
+                if workspace_path.exists() {
+                    println!("  ✓ Using workspace resources");
+                    workspace_path
+                } else {
+                    eprintln!("  ✗ Could not find 'out' directory in any location!");
+                    eprintln!("  Searched: {:?}, {:?}, {:?}", tauri_server_path, portable_path, workspace_path);
+                    return Err("'out' directory not found in any expected location".into());
+                }
+            }
+        }
+    } else {
+        println!("  ⚠ Could not get Tauri resource directory, using portable mode...");
+        // Fall back to portable mode
+        let exe_dir = env::current_exe()?.parent()
+            .ok_or("Failed to get exe directory")?
+            .to_path_buf();
+        println!("  Executable directory: {:?}", exe_dir);
+        let portable_path = exe_dir.join("out");
+        if portable_path.exists() {
+            println!("  ✓ Using portable mode resources");
+            portable_path
+        } else {
+            // Try one more location: next to the project root (for dev builds)
+            let workspace_path = exe_dir.parent()
+                .and_then(|p| p.parent())
+                .ok_or("Failed to find workspace")?
+                .join("out");
+            println!("  Trying workspace path: {:?}", workspace_path);
+            if workspace_path.exists() {
+                println!("  ✓ Using workspace resources");
+                workspace_path
+            } else {
+                eprintln!("  ✗ Could not find 'out' directory!");
+                eprintln!("  Searched: {:?}, {:?}", portable_path, workspace_path);
+                return Err("'out' directory not found".into());
+            }
+        }
+    };
+
+    println!("[2/7] Server path determined: {:?}", server_path);
+
+    println!("[3/7] Checking if server.js exists...");
+    let server_js = server_path.join("server.js");
+    if !server_js.exists() {
+        eprintln!("  ✗ server.js not found!");
+        eprintln!("  Looking for contents in server path...");
+        if let Ok(entries) = fs::read_dir(&server_path) {
+            for entry in entries {
+                if let Ok(entry) = entry {
+                    println!("    - {:?}", entry.path());
+                }
+            }
+        }
+        return Err(format!("server.js not found at: {:?}", server_js).into());
+    }
+    println!("  ✓ server.js exists");
+
+    println!("[4/7] Starting Next.js server...");
+
+    // 优先使用 portable 目录中的 node.exe（如果存在）
+    let exe_dir = env::current_exe()?.parent()
+        .ok_or("Failed to get exe directory")?
+        .to_path_buf();
+    let portable_node = exe_dir.join("node.exe");
+
+    let node_command = if portable_node.exists() {
+        println!("  ✓ 使用 portable 模式的 Node.js: {:?}", portable_node);
+        portable_node.to_string_lossy().to_string()
+    } else {
+        println!("  ⚠ 未找到 portable Node.js，使用系统 PATH 中的 node");
+        println!("  提示: 如需完全 portable，请将 node.exe 放到可执行文件目录");
+        "node".to_string()
+    };
+
+    println!("  Command: {} server.js", node_command);
+    println!("  Working directory: {:?}", server_path);
+    println!("  Environment: PORT=6001");
+
+    // Start the Next.js server with output capture
+    let child = match Command::new(&node_command)
+        .arg("server.js")
+        .current_dir(&server_path)
+        .env("PORT", "6001")
+        .spawn() {
+        Ok(child) => {
+            println!("  ✓ Server process spawned (PID: {:?})", child.id());
+            child
+        }
+        Err(e) => {
+            eprintln!("  ✗ Failed to spawn server process: {}", e);
+            if !portable_node.exists() {
+                eprintln!("  Is Node.js installed and in PATH?");
+                eprintln!("  Or place node.exe in the application directory for portable mode");
+            }
+            return Err(Box::new(e));
+        }
+    };
+
+    // Store the process handle
+    println!("[5/7] Storing process handle...");
+    *SERVER_PROCESS.lock().unwrap() = Some(child);
+    println!("  ✓ Process handle stored");
+
+    // Wait a bit for the server to start
+    println!("[6/7] Waiting for server to start (2 seconds)...");
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    println!("  ✓ Wait complete");
+
+    // Get the main window and load the Next.js app
+    println!("[7/7] Loading Next.js app in window...");
+    if let Some(window) = app_handle.get_webview_window("main") {
+        println!("  Found main window, loading http://localhost:6001");
+        match window.eval("window.location.href = 'http://localhost:6001';") {
+            Ok(_) => println!("  ✓ URL loaded successfully"),
+            Err(e) => {
+                eprintln!("  ✗ Failed to load URL: {}", e);
+                return Err(Box::new(e));
+            }
+        }
+    } else {
+        eprintln!("  ✗ Main window not found!");
+        return Err("Main window not found".into());
+    }
+
+    println!("=== Server startup complete ===");
+    Ok(())
+}
+
+fn stop_nextjs_server() {
+    if let Ok(mut process) = SERVER_PROCESS.lock() {
+        if let Some(mut child) = process.take() {
+            let _ = child.kill();
+            println!("Next.js server stopped");
+        }
+    }
 }
 
 // 打开文件对话框的函数

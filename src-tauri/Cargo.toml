@@ -25,4 +25,4 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [[bin]]
 name = "next-ai-draw-io"
-path = "src-tauri/src/main.rs"
+path = "src/main.rs"
