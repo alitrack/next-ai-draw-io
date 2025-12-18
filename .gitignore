@@ -47,3 +47,10 @@ push-via-ec2.sh
 .open-next/
 .wrangler/
 .env*.local
+
+# Tauri
+src-tauri/target/
+src-tauri/binaries/node-*
+src-tauri/binaries/*.zip
+src-tauri/binaries/*.tar.gz
+src-tauri/binaries/*.tar.xz

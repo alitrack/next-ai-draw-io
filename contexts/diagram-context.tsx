@@ -3,6 +3,7 @@
 import type React from "react"
 import { createContext, useContext, useRef, useState } from "react"
 import type { DrawIoEmbedRef } from "react-drawio"
+import { isTauriEnvironment } from "@/lib/tauri-env"
 import { STORAGE_DIAGRAM_XML_KEY } from "@/components/chat-panel"
 import type { ExportFormat } from "@/components/save-dialog"
 import { extractDiagramXML, validateAndFixXml } from "../lib/utils"
@@ -280,6 +281,11 @@ export function DiagramProvider({ children }: { children: React.ReactNode }) {
         format: string,
         sessionId?: string,
     ) => {
+        // Skip API calls in Tauri environment (uses Rust backend instead)
+        if (isTauriEnvironment()) {
+            return
+        }
+
         try {
             await fetch("/api/log-save", {
                 method: "POST",

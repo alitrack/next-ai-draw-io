@@ -20,6 +20,7 @@ import {
     SelectValue,
 } from "@/components/ui/select"
 import { Switch } from "@/components/ui/switch"
+import { getTauriAPI, isTauriEnvironment } from "@/lib/tauri-env"
 
 interface SettingsDialogProps {
     open: boolean
@@ -71,23 +72,29 @@ export function SettingsDialog({
         // Only fetch if not cached in localStorage
         if (getStoredAccessCodeRequired() !== null) return
 
-        fetch("/api/config")
-            .then((res) => {
-                if (!res.ok) throw new Error(`HTTP ${res.status}`)
-                return res.json()
-            })
-            .then((data) => {
-                const required = data?.accessCodeRequired === true
-                localStorage.setItem(
-                    STORAGE_ACCESS_CODE_REQUIRED_KEY,
-                    String(required),
-                )
-                setAccessCodeRequired(required)
-            })
-            .catch(() => {
-                // Don't cache on error - allow retry on next mount
-                setAccessCodeRequired(false)
-            })
+        // Desktop: query Rust config
+        if (isTauriEnvironment()) {
+            const tauri = getTauriAPI()
+            tauri?.invoke?.("get_config")
+                .then((data: any) => {
+                    const required =
+                        data?.access_code_required === true ||
+                        data?.accessCodeRequired === true
+                    localStorage.setItem(
+                        STORAGE_ACCESS_CODE_REQUIRED_KEY,
+                        String(required),
+                    )
+                    setAccessCodeRequired(required)
+                })
+                .catch(() => {
+                    setAccessCodeRequired(false)
+                })
+            return
+        }
+
+        // Web static build: no backend; default to not requiring an access code.
+        localStorage.setItem(STORAGE_ACCESS_CODE_REQUIRED_KEY, "false")
+        setAccessCodeRequired(false)
     }, [])
 
     useEffect(() => {
@@ -119,22 +126,28 @@ export function SettingsDialog({
         setIsVerifying(true)
 
         try {
-            const response = await fetch("/api/verify-access-code", {
-                method: "POST",
-                headers: {
-                    "x-access-code": accessCode.trim(),
-                },
-            })
+            if (isTauriEnvironment()) {
+                const tauri = getTauriAPI()
+                const data = (await tauri?.invoke?.("verify_access_code", {
+                    access_code: accessCode.trim(),
+                })) as any
 
-            const data = await response.json()
+                if (!data?.valid) {
+                    setError(data?.message || "Invalid access code")
+                    return
+                }
 
-            if (!data.valid) {
-                setError(data.message || "Invalid access code")
+                localStorage.setItem(
+                    STORAGE_ACCESS_CODE_KEY,
+                    accessCode.trim(),
+                )
+                onOpenChange(false)
                 return
             }
 
-            localStorage.setItem(STORAGE_ACCESS_CODE_KEY, accessCode.trim())
-            onOpenChange(false)
+            setError("Access code verification is only available in the desktop app.")
+            return
+
         } catch {
             setError("Failed to verify access code")
         } finally {

@@ -1,0 +1,25 @@
+{
+  "name": "next-ai-draw-io-server",
+  "version": "0.4.2",
+  "description": "Packaged Next.js server for desktop app",
+  "main": "server-wrapper.js",
+  "bin": "server-wrapper.js",
+  "pkg": {
+    "targets": [
+      "node18-win-x64",
+      "node18-macos-x64",
+      "node18-macos-arm64",
+      "node18-linux-x64"
+    ],
+    "outputPath": "../binaries",
+    "assets": [
+      "../.next/standalone/**/*",
+      "../.next/static/**/*",
+      "../public/**/*"
+    ],
+    "scripts": [
+      "../.next/standalone/server.js",
+      "../.next/standalone/.next/**/*.js"
+    ]
+  }
+}

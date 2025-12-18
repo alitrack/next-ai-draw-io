@@ -34,6 +34,7 @@ import {
     replaceNodes,
     validateAndFixXml,
 } from "@/lib/utils"
+import { isTauriEnvironment } from "@/lib/tauri-env"
 import ExamplePanel from "./chat-example-panel"
 import { CodeBlock } from "./code-block"
 
@@ -289,6 +290,11 @@ export function ChatMessageDisplay({
         }
 
         setFeedback((prev) => ({ ...prev, [messageId]: value }))
+
+        // Skip API calls in Tauri environment (uses Rust backend instead)
+        if (isTauriEnvironment()) {
+            return
+        }
 
         try {
             await fetch("/api/log-feedback", {
@@ -615,7 +621,7 @@ export function ChatMessageDisplay({
         }
     }, [messages, handleDisplayChart, chartXML])
 
-    const renderToolPart = (part: ToolPartLike) => {
+    const renderToolPart = (part: ToolPartLike, index?: number) => {
         const callId = part.toolCallId
         const { state, input, output } = part
         const isExpanded = expandedTools[callId] ?? true
@@ -641,7 +647,7 @@ export function ChatMessageDisplay({
 
         return (
             <div
-                key={callId}
+                key={index !== undefined ? `${callId}-${index}` : callId}
                 className="my-3 rounded-xl border border-border/60 bg-muted/30 overflow-hidden"
             >
                 <div className="flex items-center justify-between px-4 py-3 bg-muted/50">
@@ -758,7 +764,7 @@ export function ChatMessageDisplay({
                         const isEditing = editingMessageId === message.id
                         return (
                             <div
-                                key={message.id}
+                                key={`${message.id}-${messageIndex}`}
                                 className={`flex w-full ${message.role === "user" ? "justify-end" : "justify-start"} animate-message-in`}
                                 style={{
                                     animationDelay: `${messageIndex * 50}ms`,
@@ -999,6 +1005,7 @@ export function ChatMessageDisplay({
                                                         return renderToolPart(
                                                             group
                                                                 .parts[0] as ToolPartLike,
+                                                            groupIndex,
                                                         )
                                                     }
 

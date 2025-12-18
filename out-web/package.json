@@ -10,12 +10,12 @@
         "lint": "biome lint .",
         "format": "biome check --write .",
         "check": "biome ci",
-    "prepare": "husky",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build",
-    "tauri:build:quick": "tauri build",
-    "download:node": "node scripts/download-node.js"
-  },
+        "prepare": "husky",
+        "tauri:dev": "tauri dev",
+        "tauri:build": "node scripts/build-with-node.js && tauri build",
+        "tauri:build:quick": "tauri build",
+        "download:node": "node scripts/download-node.js"
+    },
     "dependencies": {
         "@ai-sdk/amazon-bedrock": "^3.0.70",
         "@ai-sdk/anthropic": "^2.0.44",

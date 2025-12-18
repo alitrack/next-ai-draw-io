@@ -1,7 +1,6 @@
 "use client"
 
-import { useChat } from "@ai-sdk/react"
-import { DefaultChatTransport } from "ai"
+import { useTauriChat } from "@/lib/use-tauri-chat"
 import {
     AlertTriangle,
     MessageSquarePlus,
@@ -27,6 +26,7 @@ import { isPdfFile, isTextFile } from "@/lib/pdf-utils"
 import { type FileData, useFileProcessor } from "@/lib/use-file-processor"
 import { useQuotaManager } from "@/lib/use-quota-manager"
 import { formatXML, isMxCellXmlComplete, wrapWithMxFile } from "@/lib/utils"
+import { getTauriAPI, isTauriEnvironment } from "@/lib/tauri-env"
 import { ChatMessageDisplay } from "./chat-message-display"
 
 // localStorage keys for persistence
@@ -148,17 +148,39 @@ export default function ChatPanel({
     const [showNewChatDialog, setShowNewChatDialog] = useState(false)
     const [minimalStyle, setMinimalStyle] = useState(false)
 
-    // Check config on mount
+    // Load config on mount (via Rust in Tauri)
     useEffect(() => {
-        fetch("/api/config")
-            .then((res) => res.json())
-            .then((data) => {
-                setAccessCodeRequired(data.accessCodeRequired)
-                setDailyRequestLimit(data.dailyRequestLimit || 0)
-                setDailyTokenLimit(data.dailyTokenLimit || 0)
-                setTpmLimit(data.tpmLimit || 0)
-            })
-            .catch(() => setAccessCodeRequired(false))
+        if (isTauriEnvironment()) {
+            const tauri = getTauriAPI()
+            tauri?.invoke?.("get_config")
+                .then((data: any) => {
+                    setAccessCodeRequired(
+                        data?.access_code_required === true ||
+                            data?.accessCodeRequired === true,
+                    )
+                    setDailyRequestLimit(
+                        Number(
+                            data?.daily_request_limit ??
+                                data?.dailyRequestLimit ??
+                                0,
+                        ) || 0,
+                    )
+                    setDailyTokenLimit(
+                        Number(
+                            data?.daily_token_limit ??
+                                data?.dailyTokenLimit ??
+                                0,
+                        ) || 0,
+                    )
+                    setTpmLimit(
+                        Number(data?.tpm_limit ?? data?.tpmLimit ?? 0) || 0,
+                    )
+                })
+                .catch(() => setAccessCodeRequired(false))
+            return
+        }
+        // Web static build: no backend config available.
+        setAccessCodeRequired(false)
     }, [])
 
     // Quota management using extracted hook
@@ -218,15 +240,11 @@ export default function ChatPanel({
     const {
         messages,
         sendMessage,
-        addToolOutput,
         stop,
         status,
         error,
         setMessages,
-    } = useChat({
-        transport: new DefaultChatTransport({
-            api: "/api/chat",
-        }),
+    } = useTauriChat({
         async onToolCall({ toolCall }) {
             if (DEBUG) {
                 console.log(
@@ -254,11 +272,7 @@ export default function ChatPanel({
 
                     // Tell LLM to use append_diagram to continue
                     const partialEnding = partialXmlRef.current.slice(-500)
-                    addToolOutput({
-                        tool: "display_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        state: "output-error",
-                        errorText: `Output was truncated due to length limits. Use the append_diagram tool to continue.
+                    throw new Error(`Output was truncated due to length limits. Use the append_diagram tool to continue.
 
 Your output ended with:
 \`\`\`
@@ -268,9 +282,7 @@ ${partialEnding}
 NEXT STEP: Call append_diagram with the continuation XML.
 - Do NOT include wrapper tags or root cells (id="0", id="1")
 - Start from EXACTLY where you stopped
-- Complete all remaining mxCell elements`,
-                    })
-                    return
+- Complete all remaining mxCell elements`)
                 }
 
                 // Complete XML received - use it directly
@@ -289,42 +301,31 @@ NEXT STEP: Call append_diagram with the continuation XML.
                         "[display_diagram] Validation error:",
                         validationError,
                     )
-                    // Return error to model - sendAutomaticallyWhen will trigger retry
                     if (DEBUG) {
                         console.log(
                             "[display_diagram] Adding tool output with state: output-error",
                         )
                     }
-                    addToolOutput({
-                        tool: "display_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        state: "output-error",
-                        errorText: `${validationError}
+                    throw new Error(`${validationError}
 
 Please fix the XML issues and call display_diagram again with corrected XML.
 
 Your failed XML:
 \`\`\`xml
 ${finalXml}
-\`\`\``,
-                    })
+\`\`\``)
                 } else {
-                    // Success - diagram will be rendered by chat-message-display
                     if (DEBUG) {
                         console.log(
                             "[display_diagram] Success! Adding tool output with state: output-available",
                         )
                     }
-                    addToolOutput({
-                        tool: "display_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        output: "Successfully displayed the diagram.",
-                    })
                     if (DEBUG) {
                         console.log(
                             "[display_diagram] Tool output added. Diagram should be visible now.",
                         )
                     }
+                    return "Successfully displayed the diagram."
                 }
             } else if (toolCall.toolName === "edit_diagram") {
                 const { operations } = toolCall.input as {
@@ -370,24 +371,19 @@ ${finalXml}
                             )
                             .join("\n")
 
-                        addToolOutput({
-                            tool: "edit_diagram",
-                            toolCallId: toolCall.toolCallId,
-                            state: "output-error",
-                            errorText: `Some operations failed:\n${errorMessages}
+                        throw new Error(`Some operations failed:\n${errorMessages}
 
 Current diagram XML:
 \`\`\`xml
 ${currentXml}
 \`\`\`
 
-Please check the cell IDs and retry.`,
-                        })
+Please check the cell IDs and retry.`)
                         // Clean up the shared original XML ref
                         editDiagramOriginalXmlRef.current.delete(
                             toolCall.toolCallId,
                         )
-                        return
+                        return "failed"
                     }
 
                     // loadDiagram validates and returns error if invalid
@@ -397,58 +393,46 @@ Please check the cell IDs and retry.`,
                             "[edit_diagram] Validation error:",
                             validationError,
                         )
-                        addToolOutput({
-                            tool: "edit_diagram",
-                            toolCallId: toolCall.toolCallId,
-                            state: "output-error",
-                            errorText: `Edit produced invalid XML: ${validationError}
+                        throw new Error(`Edit produced invalid XML: ${validationError}
 
 Current diagram XML:
 \`\`\`xml
 ${currentXml}
 \`\`\`
 
-Please fix the operations to avoid structural issues.`,
-                        })
+Please fix the operations to avoid structural issues.`)
                         // Clean up the shared original XML ref
                         editDiagramOriginalXmlRef.current.delete(
                             toolCall.toolCallId,
                         )
-                        return
+                        return "failed"
                     }
                     onExport()
-                    addToolOutput({
-                        tool: "edit_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        output: `Successfully applied ${operations.length} operation(s) to the diagram.`,
-                    })
+                    const okMsg = `Successfully applied ${operations.length} operation(s) to the diagram.`
                     // Clean up the shared original XML ref
                     editDiagramOriginalXmlRef.current.delete(
                         toolCall.toolCallId,
                     )
+                    return okMsg
                 } catch (error) {
                     console.error("[edit_diagram] Failed:", error)
 
                     const errorMessage =
                         error instanceof Error ? error.message : String(error)
 
-                    addToolOutput({
-                        tool: "edit_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        state: "output-error",
-                        errorText: `Edit failed: ${errorMessage}
+                    throw new Error(`Edit failed: ${errorMessage}
 
 Current diagram XML:
 \`\`\`xml
 ${currentXml || "No XML available"}
 \`\`\`
 
-Please check cell IDs and retry, or use display_diagram to regenerate.`,
-                    })
+Please check cell IDs and retry, or use display_diagram to regenerate.`)
                     // Clean up the shared original XML ref even on error
                     editDiagramOriginalXmlRef.current.delete(
                         toolCall.toolCallId,
                     )
+                    return "failed"
                 }
             } else if (toolCall.toolName === "append_diagram") {
                 const { xml } = toolCall.input as { xml: string }
@@ -464,20 +448,14 @@ Please check cell IDs and retry, or use display_diagram to regenerate.`,
                     trimmed.startsWith('<mxCell id="1"')
 
                 if (isFreshStart) {
-                    addToolOutput({
-                        tool: "append_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        state: "output-error",
-                        errorText: `ERROR: You started fresh with wrapper tags. Do NOT include wrapper tags or root cells (id="0", id="1").
+                    throw new Error(`ERROR: You started fresh with wrapper tags. Do NOT include wrapper tags or root cells (id="0", id="1").
 
 Continue from EXACTLY where the partial ended:
 \`\`\`
 ${partialXmlRef.current.slice(-500)}
 \`\`\`
 
-Start your continuation with the NEXT character after where it stopped.`,
-                    })
-                    return
+Start your continuation with the NEXT character after where it stopped.`)
                 }
 
                 // Append to accumulated XML
@@ -495,190 +473,29 @@ Start your continuation with the NEXT character after where it stopped.`,
                     const validationError = onDisplayChart(fullXml)
 
                     if (validationError) {
-                        addToolOutput({
-                            tool: "append_diagram",
-                            toolCallId: toolCall.toolCallId,
-                            state: "output-error",
-                            errorText: `Validation error after assembly: ${validationError}
+                        throw new Error(`Validation error after assembly: ${validationError}
 
 Assembled XML:
 \`\`\`xml
 ${finalXml.substring(0, 2000)}...
 \`\`\`
 
-Please use display_diagram with corrected XML.`,
-                        })
+Please use display_diagram with corrected XML.`)
                     } else {
-                        addToolOutput({
-                            tool: "append_diagram",
-                            toolCallId: toolCall.toolCallId,
-                            output: "Diagram assembly complete and displayed successfully.",
-                        })
+                        return "Diagram assembly complete and displayed successfully."
                     }
                 } else {
                     // Still incomplete - signal to continue
-                    addToolOutput({
-                        tool: "append_diagram",
-                        toolCallId: toolCall.toolCallId,
-                        state: "output-error",
-                        errorText: `XML still incomplete (mxCell not closed). Call append_diagram again to continue.
+                    throw new Error(`XML still incomplete (mxCell not closed). Call append_diagram again to continue.
 
 Current ending:
 \`\`\`
 ${partialXmlRef.current.slice(-500)}
 \`\`\`
 
-Continue from EXACTLY where you stopped.`,
-                    })
+Continue from EXACTLY where you stopped.`)
                 }
             }
-        },
-        onError: (error) => {
-            // Silence access code error in console since it's handled by UI
-            if (!error.message.includes("Invalid or missing access code")) {
-                console.error("Chat error:", error)
-                // Debug: Log messages structure when error occurs
-                console.log("[onError] messages count:", messages.length)
-                messages.forEach((msg, idx) => {
-                    console.log(`[onError] Message ${idx}:`, {
-                        role: msg.role,
-                        partsCount: msg.parts?.length,
-                    })
-                    if (msg.parts) {
-                        msg.parts.forEach((part: any, partIdx: number) => {
-                            console.log(
-                                `[onError]   Part ${partIdx}:`,
-                                JSON.stringify({
-                                    type: part.type,
-                                    toolName: part.toolName,
-                                    hasInput: !!part.input,
-                                    inputType: typeof part.input,
-                                    inputKeys:
-                                        part.input &&
-                                        typeof part.input === "object"
-                                            ? Object.keys(part.input)
-                                            : null,
-                                }),
-                            )
-                        })
-                    }
-                })
-            }
-
-            // Translate technical errors into user-friendly messages
-            // The server now handles detailed error messages, so we can display them directly.
-            // But we still handle connection/network errors that happen before reaching the server.
-            let friendlyMessage = error.message
-
-            // Simple check for network errors if message is generic
-            if (friendlyMessage === "Failed to fetch") {
-                friendlyMessage = "Network error. Please check your connection."
-            }
-
-            // Truncated tool input error (model output limit too low)
-            if (friendlyMessage.includes("toolUse.input is invalid")) {
-                friendlyMessage =
-                    "Output was truncated before the diagram could be generated. Try a simpler request or increase the maxOutputLength."
-            }
-
-            // Translate image not supported error
-            if (friendlyMessage.includes("image content block")) {
-                friendlyMessage = "This model doesn't support image input."
-            }
-
-            // Add system message for error so it can be cleared
-            setMessages((currentMessages) => {
-                const errorMessage = {
-                    id: `error-${Date.now()}`,
-                    role: "system" as const,
-                    content: friendlyMessage,
-                    parts: [{ type: "text" as const, text: friendlyMessage }],
-                }
-                return [...currentMessages, errorMessage]
-            })
-
-            if (error.message.includes("Invalid or missing access code")) {
-                // Show settings button and open dialog to help user fix it
-                setAccessCodeRequired(true)
-                setShowSettingsDialog(true)
-            }
-        },
-        onFinish: ({ message }) => {
-            // Track actual token usage from server metadata
-            const metadata = message?.metadata as
-                | Record<string, unknown>
-                | undefined
-
-            // DEBUG: Log finish reason to diagnose truncation
-            console.log("[onFinish] finishReason:", metadata?.finishReason)
-            console.log("[onFinish] metadata:", metadata)
-
-            if (metadata) {
-                // Use Number.isFinite to guard against NaN (typeof NaN === 'number' is true)
-                const inputTokens = Number.isFinite(metadata.inputTokens)
-                    ? (metadata.inputTokens as number)
-                    : 0
-                const outputTokens = Number.isFinite(metadata.outputTokens)
-                    ? (metadata.outputTokens as number)
-                    : 0
-                const actualTokens = inputTokens + outputTokens
-                if (actualTokens > 0) {
-                    quotaManager.incrementTokenCount(actualTokens)
-                    quotaManager.incrementTPMCount(actualTokens)
-                }
-            }
-        },
-        sendAutomaticallyWhen: ({ messages }) => {
-            const isInContinuationMode = partialXmlRef.current.length > 0
-
-            const shouldRetry = hasToolErrors(
-                messages as unknown as ChatMessage[],
-            )
-
-            if (!shouldRetry) {
-                // No error, reset retry count and clear state
-                autoRetryCountRef.current = 0
-                partialXmlRef.current = ""
-                return false
-            }
-
-            // Continuation mode: unlimited retries (truncation continuation, not real errors)
-            // Server limits to 5 steps via stepCountIs(5)
-            if (isInContinuationMode) {
-                // Don't count against retry limit for continuation
-                // Quota checks still apply below
-            } else {
-                // Regular error: check retry count limit
-                if (autoRetryCountRef.current >= MAX_AUTO_RETRY_COUNT) {
-                    toast.error(
-                        `Auto-retry limit reached (${MAX_AUTO_RETRY_COUNT}). Please try again manually.`,
-                    )
-                    autoRetryCountRef.current = 0
-                    partialXmlRef.current = ""
-                    return false
-                }
-                // Increment retry count for actual errors
-                autoRetryCountRef.current++
-            }
-
-            // Check quota limits before auto-retry
-            const tokenLimitCheck = quotaManager.checkTokenLimit()
-            if (!tokenLimitCheck.allowed) {
-                quotaManager.showTokenLimitToast(tokenLimitCheck.used)
-                autoRetryCountRef.current = 0
-                partialXmlRef.current = ""
-                return false
-            }
-
-            const tpmCheck = quotaManager.checkTPMLimit()
-            if (!tpmCheck.allowed) {
-                quotaManager.showTPMLimitToast()
-                autoRetryCountRef.current = 0
-                partialXmlRef.current = ""
-                return false
-            }
-
-            return true
         },
     })
 
@@ -897,12 +714,12 @@ Continue from EXACTLY where you stopped.`,
 
                     setMessages([
                         {
-                            id: `user-${Date.now()}`,
+                            id: `user-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                             role: "user" as const,
                             parts: [{ type: "text" as const, text: userText }],
                         },
                         {
-                            id: `assistant-${Date.now()}`,
+                            id: `assistant-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`,
                             role: "assistant" as const,
                             parts: [
                                 {
@@ -1059,6 +876,11 @@ Continue from EXACTLY where you stopped.`,
         previousXml: string,
         sessionId: string,
     ) => {
+        if (!isTauriEnvironment()) {
+            toast.error("Desktop app required (Tauri). Web build has no server.")
+            return
+        }
+
         // Reset all retry/continuation state on user-initiated message
         autoRetryCountRef.current = 0
         partialXmlRef.current = ""
@@ -1086,7 +908,16 @@ Continue from EXACTLY where you stopped.`,
                     }),
                 },
             },
-        )
+        ).catch((err) => {
+            const message = err instanceof Error ? err.message : String(err)
+            // Show settings dialog if access code is required/missing
+            if (message.includes("Invalid or missing access code")) {
+                setAccessCodeRequired(true)
+                setShowSettingsDialog(true)
+            }
+            toast.error(message)
+        })
+
         quotaManager.incrementRequestCount()
     }
 
